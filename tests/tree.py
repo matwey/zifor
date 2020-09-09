@@ -26,3 +26,13 @@ class TreeTest(unittest.TestCase):
 		t.fit(x)
 		depth = t.predict(x)
 		np.testing.assert_allclose(depth.flatten(), np.array([2,3,4,6,7,8,9,9,6,6], dtype=np.float32))
+
+	def test_predict2(self):
+		rng = np.random.default_rng(42)
+		t = Tree(10, 100, rng)
+		x = ma.array(np.asarray(1.0 / np.linspace(1.0, 20.0, 8)), mask=np.array([True,]*8))
+		x = x.reshape(-1,1)
+		t.fit(x)
+		depth = t.predict(x)
+		avg_depth = 2 * (np.log(8) + 0.5772156649) - 1
+		np.testing.assert_allclose(depth.flatten(), np.full((8,), avg_depth, dtype=np.float32))
