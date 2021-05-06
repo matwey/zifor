@@ -157,7 +157,7 @@ void tree::fit(const np::ndarray& data, const np::ndarray& mask) {
 		frame& operator=(const frame&) = delete;
 
 
-		std::optional<std::pair<std::size_t, std::pair<double, double>>> select_split_feature(const np::ndarray& data, const np::ndarray& mask) const {
+		std::optional<std::pair<std::size_t, std::pair<double, double>>> select_split_feature(const np::ndarray& data, const np::ndarray& mask, random_cache& random) const {
 			std::vector<std::size_t> count(data.shape(1), 0);
 			std::vector<double> max_value(data.shape(1), -std::numeric_limits<double>::infinity());
 			std::vector<double> min_value(data.shape(1), std::numeric_limits<double>::infinity());
@@ -183,10 +183,19 @@ void tree::fit(const np::ndarray& data, const np::ndarray& mask) {
 				}
 			}
 
-			const auto max_count = std::max_element(count.begin(), count.end());
+			const auto max_count = std::max_element(count.cbegin(), count.cend());
 
-			if (*max_count > 1) {
-				const auto feature = std::distance(count.begin(), max_count);
+			std::deque<std::vector<std::size_t>::const_iterator> all_max;
+			for (auto it = count.cbegin(); it != count.cend(); ++it) {
+				if (*it == *max_count) {
+					all_max.push_back(it);
+				}
+			}
+
+			const auto split_count = *(all_max.begin() + std::size_t((*++random) * all_max.size()));
+
+			if (*split_count > 1) {
+				const auto feature = std::distance(count.cbegin(), split_count);
 				const auto min_max = std::make_pair(min_value[feature], max_value[feature]);
 
 				return std::make_pair(feature, min_max);
@@ -196,7 +205,7 @@ void tree::fit(const np::ndarray& data, const np::ndarray& mask) {
 		}
 
 		std::optional<std::tuple<std::size_t, double, double>> select_split(const np::ndarray& data, const np::ndarray& mask, random_cache& random) const noexcept {
-			const auto maybe_feature = select_split_feature(data, mask);
+			const auto maybe_feature = select_split_feature(data, mask, random);
 
 			if (!maybe_feature) return {};
 
