@@ -11,6 +11,7 @@
 #include <deque>
 #include <forward_list>
 #include <iterator>
+#include <memory_resource>
 #include <numeric>
 #include <optional>
 #include <unordered_map>
@@ -116,7 +117,7 @@ public:
 private:
 	void fit(const np::ndarray& data, const np::ndarray& mask);
 	np::ndarray predict(const np::ndarray& data, const np::ndarray& mask) const;
-	float predict_one(const double* data, const std::size_t data_stride, const bool* mask, const std::size_t mask_stride) const;
+	float predict_one(const double* data, const std::size_t data_stride, const bool* mask, const std::size_t mask_stride, const std::pmr::polymorphic_allocator<void>& alloc) const;
 public:
 	const std::size_t max_depth_;
 	const std::size_t max_iter_;
@@ -142,7 +143,7 @@ struct tree::leaf {
 
 void tree::fit(const np::ndarray& data, const np::ndarray& mask) {
 	struct frame {
-		using list_type = std::forward_list<std::size_t>;
+		using list_type = std::pmr::forward_list<std::size_t>;
 
 		std::size_t id;
 		std::size_t depth;
@@ -157,10 +158,10 @@ void tree::fit(const np::ndarray& data, const np::ndarray& mask) {
 		frame& operator=(const frame&) = delete;
 
 
-		std::optional<std::pair<std::size_t, std::pair<double, double>>> select_split_feature(const np::ndarray& data, const np::ndarray& mask, random_cache& random) const {
-			std::vector<std::size_t> count(data.shape(1), 0);
-			std::vector<double> max_value(data.shape(1), -std::numeric_limits<double>::infinity());
-			std::vector<double> min_value(data.shape(1), std::numeric_limits<double>::infinity());
+		std::optional<std::pair<std::size_t, std::pair<double, double>>> select_split_feature(const np::ndarray& data, const np::ndarray& mask, random_cache& random, const std::pmr::polymorphic_allocator<void>& alloc) const {
+			std::pmr::vector<std::size_t> count(data.shape(1), 0, alloc);
+			std::pmr::vector<double> max_value(data.shape(1), -std::numeric_limits<double>::infinity(), alloc);
+			std::pmr::vector<double> min_value(data.shape(1), std::numeric_limits<double>::infinity(), alloc);
 
 			const auto row_stride = data.strides(0) / sizeof(double);
 			const auto col_stride = data.strides(1) / sizeof(double);
@@ -185,7 +186,7 @@ void tree::fit(const np::ndarray& data, const np::ndarray& mask) {
 
 			const auto max_count = std::max_element(count.cbegin(), count.cend());
 
-			std::deque<std::vector<std::size_t>::const_iterator> all_max;
+			std::pmr::deque<std::pmr::vector<std::size_t>::const_iterator> all_max(alloc);
 			for (auto it = count.cbegin(); it != count.cend(); ++it) {
 				if (*it == *max_count) {
 					all_max.push_back(it);
@@ -204,8 +205,8 @@ void tree::fit(const np::ndarray& data, const np::ndarray& mask) {
 			return {};
 		}
 
-		std::optional<std::tuple<std::size_t, double, double>> select_split(const np::ndarray& data, const np::ndarray& mask, random_cache& random) const noexcept {
-			const auto maybe_feature = select_split_feature(data, mask, random);
+		std::optional<std::tuple<std::size_t, double, double>> select_split(const np::ndarray& data, const np::ndarray& mask, random_cache& random, const std::pmr::polymorphic_allocator<void>& alloc) const noexcept {
+			const auto maybe_feature = select_split_feature(data, mask, random, alloc);
 
 			if (!maybe_feature) return {};
 
@@ -218,7 +219,7 @@ void tree::fit(const np::ndarray& data, const np::ndarray& mask) {
 		};
 
 		static std::pair<list_type, list_type> split(const np::ndarray& data, const np::ndarray& mask, std::size_t feature, double value, list_type objects) noexcept {
-			list_type left;
+			list_type left(objects.get_allocator());
 
 			const auto row_stride = data.strides(0) / sizeof(double);
 			const auto col_stride = data.strides(1) / sizeof(double);
@@ -249,13 +250,16 @@ void tree::fit(const np::ndarray& data, const np::ndarray& mask) {
 		}
 	};
 
+	std::pmr::unsynchronized_pool_resource resource;
+	std::pmr::polymorphic_allocator<void> alloc(&resource);
+
 	std::size_t next_leaf_id = 0;
-	std::unordered_multimap<std::size_t, std::size_t> index; /* object_id -> leaf_id */
-	std::forward_list<frame> stack;
+	std::pmr::unordered_multimap<std::size_t, std::size_t> index(alloc); /* object_id -> leaf_id */
+	std::pmr::deque<frame> stack(alloc);
 
 	/* Prepare root node */
 	{
-		frame::list_type all_objects;
+		frame::list_type all_objects(alloc);
 		for (auto i = 0; i < data.shape(0); ++i) {
 			all_objects.emplace_front(i);
 		}
@@ -268,7 +272,7 @@ void tree::fit(const np::ndarray& data, const np::ndarray& mask) {
 		stack.pop_front();
 
 		if (c.depth < max_depth_) {
-			if (auto s = c.select_split(data, mask, random_); s) {
+			if (auto s = c.select_split(data, mask, random_, alloc); s) {
 				auto [feature, value, raw_value] = *s;
 				auto [lo, ro] = frame::split(data, mask, feature, value, std::move(c.objects));
 
@@ -297,8 +301,8 @@ void tree::fit(const np::ndarray& data, const np::ndarray& mask) {
 	}
 
 	/* Init leaf weight */
-	std::vector<float> tau(next_leaf_id, static_cast<float>(1)/next_leaf_id);
-	std::vector<float> tm(index.size());
+	std::vector<float> tau(next_leaf_id, static_cast<float>(1)/next_leaf_id); // tau is to be moved to leaf_density_
+	std::pmr::vector<float> tm(index.size(), alloc);
 
 	for (std::size_t iter = 0; iter < max_iter_; ++iter) {
 		/* Unroll T */
@@ -339,6 +343,9 @@ void tree::fit(const np::ndarray& data, const np::ndarray& mask) {
 }
 
 np::ndarray tree::predict(const np::ndarray& data, const np::ndarray& mask) const {
+	std::pmr::unsynchronized_pool_resource resource;
+	std::pmr::polymorphic_allocator<void> alloc(&resource);
+
 	const auto shape = p::make_tuple(data.shape(0), 1);
 	auto ret = np::zeros(shape, np::dtype::get_builtin<float>());
 
@@ -357,13 +364,13 @@ np::ndarray tree::predict(const np::ndarray& data, const np::ndarray& mask) cons
 	auto ret_iter = pret;
 	std::size_t i = 0;
 	for (; i < data.shape(0); ++i, row_iter += row_stride, mask_row_iter += mask_row_stride, ret_iter += ret_stride) {
-		*ret_iter = predict_one(row_iter, col_stride, mask_row_iter, mask_col_stride);
+		*ret_iter = predict_one(row_iter, col_stride, mask_row_iter, mask_col_stride, alloc);
 	}
 
 	return ret;
 }
 
-float tree::predict_one(const double* data, const std::size_t data_stride, const bool* mask, const std::size_t mask_stride) const {
+float tree::predict_one(const double* data, const std::size_t data_stride, const bool* mask, const std::size_t mask_stride, const std::pmr::polymorphic_allocator<void>& alloc) const {
 	struct frame {
 		std::size_t id;
 		std::size_t depth;
@@ -380,7 +387,7 @@ float tree::predict_one(const double* data, const std::size_t data_stride, const
 	float depth_sum = 0;
 	float norm = 0;
 
-	std::forward_list<frame> stack;
+	std::pmr::deque<frame> stack(alloc);
 	stack.emplace_front(std::size_t(0), std::size_t(1));
 
 	while (!stack.empty()) {
