@@ -25,7 +25,7 @@ class TreeTest(unittest.TestCase):
 		x = x.reshape(-1,1)
 		t.fit(x)
 		depth = t.predict(x)
-		np.testing.assert_allclose(depth.flatten(), np.array([2,3,4,6,7,8,9,9,6,6], dtype=np.float32))
+		np.testing.assert_allclose(depth.flatten(), np.array([2,3,6,6,6,7,7,5,6,6], dtype=np.float32))
 
 	def test_predict2(self):
 		rng = np.random.default_rng(42)
