@@ -1,0 +1,35 @@
+[build-system]
+requires = ["scikit-build-core>=0.3.3", "nanobind"]
+build-backend = "scikit_build_core.build"
+
+[project]
+version = "0.1.1"
+name = "zifor"
+description = "Isolation Forest implementation"
+authors = [
+    { name = "Matwey V. Kornilov", email = "matwey.kornilov@gmail.com" },
+]
+requires-python = ">=3.9"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Programming Language :: Python :: 3 :: Only",
+]
+license = {text = "GPL-3.0-or-later"}
+dependencies = ["numpy"]
+
+[project.optional-dependencies]
+dev = [
+  "nanobind",
+  "numpy",
+  "pytest",
+]
+
+[tool.scikit-build]
+build.verbose = true
+wheel.py-api = "cp312"
+
+[tool.pytest.ini_options]
+addopts = [
+    "-v",
+]

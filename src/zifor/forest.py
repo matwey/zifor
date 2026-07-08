@@ -8,12 +8,12 @@ class IsolationForest(object):
 
 	def fit(self, X):
 		for e in self.estimators_:
-			e.fit(X)
+			e.fit(X.data, X.mask)
 
 	def predict(self, X):
 		acc = np.empty(shape=(len(self.estimators_), X.shape[0]), dtype=np.float64)
 
 		for i, e in enumerate(self.estimators_):
-			acc[i, :] = e.predict(X).reshape(-1)
+			acc[i, :] = e.predict(X.data, X.mask).reshape(-1)
 
 		return np.mean(acc, axis=0)

@@ -1,9 +1,5 @@
-#include <boost/python/module.hpp>
-#include <boost/python/def.hpp>
-#include <boost/python/numpy.hpp>
-#include <boost/python/call.hpp>
-
-#include <boost/math/constants/constants.hpp>
+#include <nanobind/nanobind.h>
+#include <nanobind/ndarray.h>
 
 #include <iostream>
 
@@ -13,13 +9,14 @@
 #include <iterator>
 #include <memory_resource>
 #include <numeric>
+#include <numbers>
 #include <optional>
 #include <unordered_map>
 #include <variant>
 #include <vector>
 
-namespace p  = boost::python;
-namespace np = boost::python::numpy;
+namespace nb = nanobind;
+using namespace nb::literals;
 
 
 class random_cache {
@@ -30,13 +27,11 @@ public:
 	typedef value_type& reference;
 	typedef std::input_iterator_tag iterator_category;
 
-	random_cache(const p::object& uniform_call, std::size_t size = 1024):
+	random_cache(const nb::object& uniform_call, std::size_t size = 1024):
 		uniform_call_(uniform_call),
 		size_(size),
 		cache_(refill()),
 		pos_(0) {
-
-		assert(np::dtype::get_builtin<value_type>() == cache_.get_dtype());
 	}
 
 	random_cache(const random_cache&) = default;
@@ -59,11 +54,11 @@ public:
 	}
 
 	const reference operator*() const {
-		return reinterpret_cast<pointer>(cache_.get_data())[pos_];
+		return reinterpret_cast<pointer>(cache_.data())[pos_];
 	}
 
 	bool operator==(const random_cache& other) const {
-		return uniform_call_ == other.uniform_call_ && size_ == other.size_ && cache_ == other.cache_ && pos_ == other.pos_;
+		return uniform_call_.is(other.uniform_call_) && size_ == other.size_ && cache_.is_valid() == other.cache_.is_valid() && pos_ == other.pos_;
 	}
 	bool operator!=(const random_cache& other) const {
 		return !(*this == other);
@@ -76,14 +71,14 @@ private:
 		}
 	}
 
-	np::ndarray refill() const {
-		return p::call<np::ndarray>(uniform_call_.ptr(), 0.0, 1.0, size_);
+	nb::ndarray<double, nb::ndim<1>> refill() const {
+		return nb::cast<nb::ndarray<double, nb::ndim<1>>>(uniform_call_(0.0, 1.0, size_));
 	}
 
 private:
-	p::object uniform_call_;
+	nb::object uniform_call_;
 	const std::size_t size_;
-	np::ndarray cache_;
+	nb::ndarray<double, nb::ndim<1>> cache_;
 	std::size_t pos_;
 };
 
@@ -95,28 +90,20 @@ private:
 	struct leaf;
 	using node = std::variant<empty, split, leaf>;
 public:
-	tree(std::size_t max_depth, std::size_t max_iter, const p::object& random_generator):
+	using value_type = double;
+	using data_type = nb::ndarray<value_type, nb::ndim<2>>;
+	using mask_type = nb::ndarray<bool, nb::ndim<2>>;
+	using scores_type = nb::ndarray<float, nb::ndim<1>>;
+
+	tree(std::size_t max_depth, std::size_t max_iter, const nb::object& random_generator):
 		max_depth_(max_depth),
 		max_iter_(max_iter),
 		random_(random_generator.attr("uniform")) {
 	}
 
-	void fit(const p::object& X) {
-		const auto& data = p::extract<np::ndarray>(X.attr("data"))();
-		const auto& mask = p::extract<np::ndarray>(X.attr("mask"))();
-
-		fit(data, mask);
-	}
-
-	np::ndarray predict(const p::object& X) const {
-		const auto& data = p::extract<np::ndarray>(X.attr("data"))();
-		const auto& mask = p::extract<np::ndarray>(X.attr("mask"))();
-
-		return predict(data, mask);
-	}
+	void fit(const data_type& data, const mask_type& mask);
+	scores_type predict(const data_type& data, const mask_type& mask) const;
 private:
-	void fit(const np::ndarray& data, const np::ndarray& mask);
-	np::ndarray predict(const np::ndarray& data, const np::ndarray& mask) const;
 	float predict_one(const double* data, const std::size_t data_stride, const bool* mask, const std::size_t mask_stride, const std::pmr::polymorphic_allocator<void>& alloc) const;
 public:
 	const std::size_t max_depth_;
@@ -141,7 +128,7 @@ struct tree::leaf {
 	std::size_t size;
 };
 
-void tree::fit(const np::ndarray& data, const np::ndarray& mask) {
+void tree::fit(const data_type& data, const mask_type& mask) {
 	struct frame {
 		using list_type = std::pmr::forward_list<std::size_t>;
 
@@ -158,18 +145,18 @@ void tree::fit(const np::ndarray& data, const np::ndarray& mask) {
 		frame& operator=(const frame&) = delete;
 
 
-		std::optional<std::pair<std::size_t, std::pair<double, double>>> select_split_feature(const np::ndarray& data, const np::ndarray& mask, random_cache& random, const std::pmr::polymorphic_allocator<void>& alloc) const {
+		std::optional<std::pair<std::size_t, std::pair<double, double>>> select_split_feature(const data_type& data, const mask_type& mask, random_cache& random, const std::pmr::polymorphic_allocator<void>& alloc) const {
 			std::pmr::vector<std::size_t> count(data.shape(1), 0, alloc);
 			std::pmr::vector<double> max_value(data.shape(1), -std::numeric_limits<double>::infinity(), alloc);
 			std::pmr::vector<double> min_value(data.shape(1), std::numeric_limits<double>::infinity(), alloc);
 
-			const auto row_stride = data.strides(0) / sizeof(double);
-			const auto col_stride = data.strides(1) / sizeof(double);
-			const auto mask_row_stride = mask.strides(0) / sizeof(bool);
-			const auto mask_col_stride = mask.strides(1) / sizeof(bool);
+			const auto row_stride = data.stride(0);
+			const auto col_stride = data.stride(1);
+			const auto mask_row_stride = mask.stride(0);
+			const auto mask_col_stride = mask.stride(1);
 
-			const auto pdata = reinterpret_cast<const double*>(data.get_data());
-			const auto pmask = reinterpret_cast<const bool*>(mask.get_data());
+			const auto pdata = data.data();
+			const auto pmask = mask.data();
 
 			for (const auto& i: objects) {
 				auto col_iter = pdata + i * row_stride;
@@ -205,7 +192,7 @@ void tree::fit(const np::ndarray& data, const np::ndarray& mask) {
 			return {};
 		}
 
-		std::optional<std::tuple<std::size_t, double, double>> select_split(const np::ndarray& data, const np::ndarray& mask, random_cache& random, const std::pmr::polymorphic_allocator<void>& alloc) const noexcept {
+		std::optional<std::tuple<std::size_t, double, double>> select_split(const data_type& data, const mask_type& mask, random_cache& random, const std::pmr::polymorphic_allocator<void>& alloc) const noexcept {
 			const auto maybe_feature = select_split_feature(data, mask, random, alloc);
 
 			if (!maybe_feature) return {};
@@ -218,16 +205,16 @@ void tree::fit(const np::ndarray& data, const np::ndarray& mask) {
 			return std::make_tuple(feature, value, raw_value);
 		};
 
-		static std::pair<list_type, list_type> split(const np::ndarray& data, const np::ndarray& mask, std::size_t feature, double value, list_type objects) noexcept {
+		static std::pair<list_type, list_type> split(const data_type& data, const mask_type& mask, std::size_t feature, double value, list_type objects) noexcept {
 			list_type left(objects.get_allocator());
 
-			const auto row_stride = data.strides(0) / sizeof(double);
-			const auto col_stride = data.strides(1) / sizeof(double);
-			const auto mask_row_stride = mask.strides(0) / sizeof(bool);
-			const auto mask_col_stride = mask.strides(1) / sizeof(bool);
+			const auto row_stride = data.stride(0);
+			const auto col_stride = data.stride(1);
+			const auto mask_row_stride = mask.stride(0);
+			const auto mask_col_stride = mask.stride(1);
 
-			const auto pdata = reinterpret_cast<const double*>(data.get_data()) + feature * col_stride;
-			const auto pmask = reinterpret_cast<const bool*>(mask.get_data()) + feature * mask_col_stride;
+			const auto pdata = data.data() + feature * col_stride;
+			const auto pmask = mask.data() + feature * mask_col_stride;
 
 			auto pre_it = objects.before_begin();
 			auto it = objects.begin();
@@ -260,7 +247,7 @@ void tree::fit(const np::ndarray& data, const np::ndarray& mask) {
 	/* Prepare root node */
 	{
 		frame::list_type all_objects(alloc);
-		for (auto i = 0; i < data.shape(0); ++i) {
+		for (std::size_t i = 0; i < data.shape(0); ++i) {
 			all_objects.emplace_front(i);
 		}
 		stack.emplace_front(0, 0, std::move(all_objects));
@@ -342,22 +329,25 @@ void tree::fit(const np::ndarray& data, const np::ndarray& mask) {
 	leaf_density_ = std::move(tau);
 }
 
-np::ndarray tree::predict(const np::ndarray& data, const np::ndarray& mask) const {
+tree::scores_type tree::predict(const data_type& data, const mask_type& mask) const {
 	std::pmr::unsynchronized_pool_resource resource;
 	std::pmr::polymorphic_allocator<void> alloc(&resource);
 
-	const auto shape = p::make_tuple(data.shape(0), 1);
-	auto ret = np::zeros(shape, np::dtype::get_builtin<float>());
+	const auto nrows = data.shape(0);
 
-	const auto row_stride = data.strides(0) / sizeof(double);
-	const auto col_stride = data.strides(1) / sizeof(double);
-	const auto mask_row_stride = mask.strides(0) / sizeof(bool);
-	const auto mask_col_stride = mask.strides(1) / sizeof(bool);
-	const auto ret_stride = ret.strides(0) / sizeof(float);
+	// Create numpy zeros array via Python call
+	auto np = nb::module_::import_("numpy");
+	auto ret = nb::cast<scores_type>(np.attr("zeros")(nrows, np.attr("float32")));
 
-	const auto pdata = reinterpret_cast<const double*>(data.get_data());
-	const auto pmask = reinterpret_cast<const bool*>(mask.get_data());
-	auto pret = reinterpret_cast<float*>(ret.get_data());
+	const auto row_stride = data.stride(0);
+	const auto col_stride = data.stride(1);
+	const auto mask_row_stride = mask.stride(0);
+	const auto mask_col_stride = mask.stride(1);
+	const auto ret_stride = ret.stride(0);
+
+	const auto pdata = data.data();
+	const auto pmask = mask.data();
+	float* pret = ret.data();
 
 	auto row_iter = pdata;
 	auto mask_row_iter = pmask;
@@ -413,7 +403,7 @@ float tree::predict_one(const double* data, const std::size_t data_stride, const
 				}
 			} else if constexpr (std::is_same_v<T, leaf>) {
 				const auto fdepth = static_cast<float>(c.depth);
-				const auto depth = (x.size == 1 ? fdepth : fdepth + 2*(boost::math::constants::euler<float>()-1+std::log(static_cast<float>(x.size))));
+				const auto depth = (x.size == 1 ? fdepth : fdepth + 2*(std::numbers::egamma_v<float>-1+std::log(static_cast<float>(x.size))));
 				const auto tau = leaf_density_[x.id] / x.size;
 
 				depth_sum += tau * depth;
@@ -427,20 +417,13 @@ float tree::predict_one(const double* data, const std::size_t data_stride, const
 	return depth_sum / norm;
 }
 
-BOOST_PYTHON_MODULE(tree)
-{
-	using namespace boost::python;
-	using namespace boost::python::numpy;
+NB_MODULE(tree, m) {
+	m.attr("__version__") = VERSION_INFO;
 
-	numpy::initialize();
-
-	void (tree::*fit)(const object&) = &tree::fit;
-	ndarray (tree::*predict)(const object&) const = &tree::predict;
-
-	class_<tree>("Tree", init<std::size_t, std::size_t, object>())
-		.def_readonly("max_depth", &tree::max_depth_)
-		.def_readonly("max_iter", &tree::max_iter_)
-		.def("fit", fit)
-		.def("predict", predict);
+	nb::class_<tree>(m, "Tree")
+		.def(nb::init<std::size_t, std::size_t, nb::object>())
+		.def_ro("max_depth", &tree::max_depth_)
+		.def_ro("max_iter", &tree::max_iter_)
+		.def("fit", &tree::fit)
+		.def("predict", &tree::predict);
 }
-
